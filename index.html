@@ -883,278 +883,260 @@
   </div>
 
   <script>
-    const shareBtn = document.getElementById('shareBtn');
-    const startRecBtn = document.getElementById('startRecBtn');
-    const stopRecBtn = document.getElementById('stopRecBtn');
-    const micOnlyBtn = document.getElementById('micOnlyBtn');
-    const preview = document.getElementById('preview');
-    const statusIndicator = document.getElementById('statusIndicator');
-    const statusText = document.getElementById('statusText');
-    const recordStatePill = document.getElementById('recordStatePill');
-    const transcriptChip = document.getElementById('transcriptChip');
-    const transcriptText = document.getElementById('transcriptText');
-    const summaryBox = document.getElementById('summaryBox');
-    const meetingMeta = document.getElementById('meetingMeta');
-    const copySummaryBtn = document.getElementById('copySummaryBtn');
-    const summarizeBtn = document.getElementById('summarizeBtn');
+  const shareBtn = document.getElementById('shareBtn');
+  const startRecBtn = document.getElementById('startRecBtn');
+  const stopRecBtn = document.getElementById('stopRecBtn');
+  const micOnlyBtn = document.getElementById('micOnlyBtn');
+  const preview = document.getElementById('preview');
+  const statusIndicator = document.getElementById('statusIndicator');
+  const statusText = document.getElementById('statusText');
+  const recordStatePill = document.getElementById('recordStatePill');
+  const transcriptChip = document.getElementById('transcriptChip');
+  const transcriptText = document.getElementById('transcriptText');
+  const summaryBox = document.getElementById('summaryBox');
+  const meetingMeta = document.getElementById('meetingMeta');
+  const copySummaryBtn = document.getElementById('copySummaryBtn');
+  const summarizeBtn = document.getElementById('summarizeBtn');
 
-    let displayStream = null;
-    let micStream = null;
-    let combinedStream = null;
-    let mediaRecorder = null;
-    let chunks = [];
-    let currentMode = "idle"; // "teams" | "mic"
+  let displayStream = null;
+  let micStream = null;
+  let combinedStream = null;
+  let mediaRecorder = null;
+  let chunks = [];
+  let currentMode = "idle";
 
-    function setStatus(mode, message) {
-      statusText.textContent = message;
+  function setStatus(mode, message) {
+    statusText.textContent = message;
 
-      statusIndicator.classList.remove('active', 'recording', 'error');
-      recordStatePill.classList.remove('paused');
+    statusIndicator.classList.remove('active', 'recording', 'error');
+    recordStatePill.classList.remove('paused');
 
-      const dotEl = recordStatePill.querySelector('.dot');
+    const dotEl = recordStatePill.querySelector('.dot');
 
-      if (mode === 'idle') {
-        if (dotEl) dotEl.style.background = '#22c55e';
-        statusIndicator.classList.add('active');
-        recordStatePill.textContent = '';
-        const dot = document.createElement('span');
-        dot.className = 'dot';
-        recordStatePill.appendChild(dot);
-        recordStatePill.appendChild(document.createTextNode(' Ready to capture'));
-      } else if (mode === 'recording') {
-        statusIndicator.classList.add('recording');
-        if (dotEl) dotEl.style.background = '#f97316';
-        recordStatePill.classList.add('paused');
-        if (recordStatePill.childNodes[1]) {
-          recordStatePill.childNodes[1].nodeValue = ' Recording in progress';
+    if (mode === 'idle') {
+      if (dotEl) dotEl.style.background = '#22c55e';
+      statusIndicator.classList.add('active');
+      recordStatePill.textContent = '';
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      recordStatePill.appendChild(dot);
+      recordStatePill.appendChild(document.createTextNode(' Ready to capture'));
+    } else if (mode === 'recording') {
+      statusIndicator.classList.add('recording');
+      if (dotEl) dotEl.style.background = '#f97316';
+      recordStatePill.classList.add('paused');
+      if (recordStatePill.childNodes[1]) {
+        recordStatePill.childNodes[1].nodeValue = ' Recording in progress';
+      }
+    } else if (mode === 'processing') {
+      if (dotEl) dotEl.style.background = '#22c55e';
+      if (recordStatePill.childNodes[1]) {
+        recordStatePill.childNodes[1].nodeValue = ' Processing audio…';
+      }
+    } else if (mode === 'error') {
+      statusIndicator.classList.add('error');
+      if (dotEl) dotEl.style.background = '#ef4444';
+      if (recordStatePill.childNodes[1]) {
+        recordStatePill.childNodes[1].nodeValue = ' Something went wrong';
+      }
+    }
+  }
+
+  async function startTeamsShare() {
+    try {
+      displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true
+      });
+      preview.srcObject = displayStream;
+      startRecBtn.disabled = false;
+      currentMode = "teams";
+      setStatus('idle', 'Teams window/tab shared. Click Start recording when you are ready.');
+      transcriptChip.textContent = 'Waiting for recording…';
+
+      displayStream.getVideoTracks()[0].addEventListener('ended', () => {
+        displayStream = null;
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
         }
-      } else if (mode === 'processing') {
-        if (dotEl) dotEl.style.background = '#22c55e';
-        if (recordStatePill.childNodes[1]) {
-          recordStatePill.childNodes[1].nodeValue = ' Processing audio…';
-        }
-      } else if (mode === 'error') {
-        statusIndicator.classList.add('error');
-        if (dotEl) dotEl.style.background = '#ef4444';
-        if (recordStatePill.childNodes[1]) {
-          recordStatePill.childNodes[1].nodeValue = ' Something went wrong';
-        }
-      }
+        startRecBtn.disabled = true;
+        stopRecBtn.disabled = true;
+        setStatus('idle', 'Screen share ended. Share again to capture a new meeting.');
+      });
+    } catch (err) {
+      console.error(err);
+      setStatus('error', 'Screen share cancelled or blocked. Please try again.');
+    }
+  }
+
+  async function startMicOnly() {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      preview.srcObject = null;
+      currentMode = "mic";
+      startRecBtn.disabled = false;
+      setStatus('idle', 'Microphone ready. Join the meeting and click Start recording.');
+      transcriptChip.textContent = 'Waiting for recording…';
+    } catch (err) {
+      console.error(err);
+      setStatus('error', 'Microphone permission denied. Check browser settings and retry.');
+    }
+  }
+
+  function buildCombinedStream() {
+    if (currentMode === "teams" && displayStream) {
+      return displayStream;
+    }
+    if (currentMode === "mic" && micStream) {
+      const audioTracks = micStream.getAudioTracks();
+      const combined = new MediaStream();
+      audioTracks.forEach(t => combined.addTrack(t));
+      return combined;
+    }
+    return null;
+  }
+
+  function startRecording() {
+    combinedStream = buildCombinedStream();
+    if (!combinedStream) {
+      alert('No capture stream available. Share your Teams window/tab or enable the mic first.');
+      return;
     }
 
-    function buildFallbackSummary(transcript) {
-      const sentences = transcript
-        .split(/[.?!]\s+/)
-        .map(s => s.trim())
-        .filter(Boolean);
-
-      if (!sentences.length) {
-        return 'No transcript found. Try again with your mic closer or system audio louder.';
-      }
-
-      const maxSentences = 6;
-      const intro = sentences.slice(0, maxSentences).join('. ') + '.';
-
-      const actionKeywords = ['will', 'need to', 'should', 'must', 'action', 'deadline', 'follow up', 'task'];
-      const actions = sentences.filter(s =>
-        actionKeywords.some(k => s.toLowerCase().includes(k))
-      );
-
-      const bullets = actions.map(a => '• ' + a).join('\n');
-
-      return [
-        'Summary',
-        '',
-        intro,
-        '',
-        'Action items',
-        bullets || '• No clear action items detected. You may want to quickly add them manually.'
-      ].join('\n');
+    chunks = [];
+    try {
+      mediaRecorder = new MediaRecorder(combinedStream, {
+        mimeType: 'video/webm;codecs=vp8,opus'
+      });
+    } catch (e) {
+      mediaRecorder = new MediaRecorder(combinedStream);
     }
 
-    async function startTeamsShare() {
-      try {
-        displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true
-        });
-        preview.srcObject = displayStream;
-        startRecBtn.disabled = false;
-        currentMode = "teams";
-        setStatus('idle', 'Teams window/tab shared. Click Start recording when you are ready.');
-        transcriptChip.textContent = 'Waiting for recording…';
-
-        displayStream.getVideoTracks()[0].addEventListener('ended', () => {
-          displayStream = null;
-          if (mediaRecorder && mediaRecorder.state === 'recording') {
-            mediaRecorder.stop();
-          }
-          startRecBtn.disabled = true;
-          stopRecBtn.disabled = true;
-          setStatus('idle', 'Screen share ended. Share again to capture a new meeting.');
-        });
-      } catch (err) {
-        console.error(err);
-        setStatus('error', 'Screen share cancelled or blocked. Please try again.');
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        chunks.push(e.data);
       }
-    }
+    };
 
-    async function startMicOnly() {
-      try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        preview.srcObject = null;
-        currentMode = "mic";
-        startRecBtn.disabled = false;
-        setStatus('idle', 'Microphone ready. Join the meeting and click Start recording.');
-        transcriptChip.textContent = 'Waiting for recording…';
-      } catch (err) {
-        console.error(err);
-        setStatus('error', 'Microphone permission denied. Check browser settings and retry.');
-      }
-    }
-
-    function buildCombinedStream() {
-      if (currentMode === "teams" && displayStream) {
-        return displayStream;
-      }
-      if (currentMode === "mic" && micStream) {
-        const audioTracks = micStream.getAudioTracks();
-        const combined = new MediaStream();
-        audioTracks.forEach(t => combined.addTrack(t));
-        return combined;
-      }
-      return null;
-    }
-
-    function startRecording() {
-      combinedStream = buildCombinedStream();
-      if (!combinedStream) {
-        alert('No capture stream available. Share your Teams window/tab or enable the mic first.');
-        return;
-      }
-
-      chunks = [];
-      try {
-        mediaRecorder = new MediaRecorder(combinedStream, {
-          mimeType: 'video/webm;codecs=vp8,opus'
-        });
-      } catch (e) {
-        mediaRecorder = new MediaRecorder(combinedStream);
-      }
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) {
-          chunks.push(e.data);
-        }
-      };
-
-      mediaRecorder.onstop = async () => {
-        setStatus('processing', 'Uploading recording to backend and generating transcript…');
-        const blob = new Blob(chunks, { type: 'video/webm' });
-        const formData = new FormData();
-        // NOTE: server.js new version expects field name "audio"
-        formData.append('audio', blob, 'teams_meeting.webm');
-
-        try {
-          const res = await fetch('/upload', {
-            method: 'POST',
-            body: formData
-          });
-
-          if (!res.ok) {
-            throw new Error('Backend error: ' + res.status);
-          }
-
-          const data = await res.json();
-          const transcript = (data.transcript || '').trim();
-
-          transcriptChip.textContent = transcript ? 'Transcript ready' : 'No transcript from backend';
-          transcriptText.textContent = transcript || 'No transcript returned. Check your backend STT implementation.';
-
-          summaryBox.textContent = 'Transcript ready. Click “Summarize transcript” to generate key points from this meeting.';
-          meetingMeta.textContent = 'Transcript generated. Review or edit, then click Summarize to get key points.';
-          setStatus('idle', 'Done. Transcript generated.');
-        } catch (err) {
-          console.error(err);
-          transcriptChip.textContent = 'Error';
-          transcriptText.textContent = 'Failed to reach /upload endpoint. Make sure your backend is running and returns JSON { transcript }.';
-          summaryBox.textContent = 'Could not generate transcript because the backend request failed.';
-          meetingMeta.textContent = 'Backend error – fix your /upload endpoint and try again.';
-          setStatus('error', 'Backend request failed. See console for details.');
-        } finally {
-          startRecBtn.disabled = false;
-          stopRecBtn.disabled = true;
-        }
-      };
-
-      mediaRecorder.start();
-      setStatus('recording', 'Recording in progress… Speak normally; Teams audio is being captured.');
-      startRecBtn.disabled = true;
-      stopRecBtn.disabled = false;
-    }
-
-    function stopRecording() {
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-      }
-    }
-
-    // Summarize existing transcript using /summarize
-    summarizeBtn.addEventListener('click', async () => {
-      const transcript = (transcriptText.textContent || '').trim();
-      if (!transcript) {
-        alert('Transcript is empty. Record a meeting first.');
-        return;
-      }
-
-      summaryBox.textContent = 'Summarizing into key decisions and action items…';
-      meetingMeta.textContent = 'Summarizing current transcript into key points.';
+    mediaRecorder.onstop = async () => {
+      setStatus('processing', 'Uploading recording to backend and generating transcript…');
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const formData = new FormData();
+      formData.append('audio', blob, 'teams_meeting.webm');
 
       try {
-        const res = await fetch('/summarize', {
+        const res = await fetch('/upload', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ transcript })
+          body: formData
         });
 
         if (!res.ok) {
-          throw new Error('Server error while summarizing');
+          throw new Error('Backend error: ' + res.status);
         }
 
         const data = await res.json();
-        const summary = (data.summary || '').trim();
+        const transcript = (data.transcript || '').trim();
 
-        summaryBox.textContent = summary || 'No summary generated.';
-        meetingMeta.textContent = 'Summary updated. You can copy it into your notes.';
+        // FULL transcript shown immediately after stop:
+        transcriptChip.textContent = transcript ? 'Transcript ready' : 'No transcript from backend';
+        transcriptText.textContent =
+          transcript ||
+          'No transcript returned. Check your backend STT implementation.';
+
+        // show transcript itself in the main box, not a placeholder
+        summaryBox.textContent =
+          transcript ||
+          'No transcript returned. Check your backend STT implementation.';
+        meetingMeta.textContent =
+          'Full transcript displayed. Click “Summarize transcript” to extract key decisions and actions.';
+        setStatus('idle', 'Done. Transcript generated.');
       } catch (err) {
         console.error(err);
-        summaryBox.textContent = 'Failed to generate summary. Please try again.';
-        meetingMeta.textContent = 'Summary error – see console.';
+        transcriptChip.textContent = 'Error';
+        transcriptText.textContent =
+          'Failed to reach /upload endpoint. Make sure your backend is running and returns JSON { transcript }.';
+        summaryBox.textContent =
+          'Could not generate transcript because the backend request failed.';
+        meetingMeta.textContent =
+          'Backend error – fix your /upload endpoint and try again.';
+        setStatus('error', 'Backend request failed. See console for details.');
+      } finally {
+        startRecBtn.disabled = false;
+        stopRecBtn.disabled = true;
       }
-    });
+    };
 
-    shareBtn.addEventListener('click', startTeamsShare);
-    micOnlyBtn.addEventListener('click', startMicOnly);
-    startRecBtn.addEventListener('click', startRecording);
-    stopRecBtn.addEventListener('click', stopRecording);
+    mediaRecorder.start();
+    setStatus('recording', 'Recording in progress… Speak normally; Teams audio is being captured.');
+    startRecBtn.disabled = true;
+    stopRecBtn.disabled = false;
+  }
 
-    copySummaryBtn.addEventListener('click', async () => {
-      const text = summaryBox.textContent.trim();
-      if (!text) return;
-      try {
-        await navigator.clipboard.writeText(text);
-        copySummaryBtn.textContent = '✔ Copied';
-        setTimeout(() => {
-          copySummaryBtn.textContent = '⧉ Copy to clipboard';
-        }, 1200);
-      } catch (e) {
-        console.error(e);
-        copySummaryBtn.textContent = 'Error';
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+    }
+  }
+
+  // uses new /summarize endpoint
+  summarizeBtn.addEventListener('click', async () => {
+    const transcript = (transcriptText.textContent || '').trim();
+    if (!transcript) {
+      alert('Transcript is empty. Record a meeting first.');
+      return;
+    }
+
+    summaryBox.textContent =
+      'Summarizing into key decisions and action items…';
+    meetingMeta.textContent =
+      'Summarizing current transcript into key points.';
+
+    try {
+      const res = await fetch('/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript })
+      });
+
+      if (!res.ok) {
+        throw new Error('Server error while summarizing');
       }
-    });
 
-    // Initial state
-    setStatus('idle', 'Idle – waiting for Teams window or mic.');
-  </script>
+      const data = await res.json();
+      const summary = (data.summary || '').trim();
+
+      summaryBox.textContent = summary || 'No summary generated.';
+      meetingMeta.textContent =
+        'Summary updated. You can copy it into your notes.';
+    } catch (err) {
+      console.error(err);
+      summaryBox.textContent =
+        'Failed to generate summary. Please try again.';
+      meetingMeta.textContent = 'Summary error – see console.';
+    }
+  });
+
+  shareBtn.addEventListener('click', startTeamsShare);
+  micOnlyBtn.addEventListener('click', startMicOnly);
+  startRecBtn.addEventListener('click', startRecording);
+  stopRecBtn.addEventListener('click', stopRecording);
+
+  copySummaryBtn.addEventListener('click', async () => {
+    const text = summaryBox.textContent.trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      copySummaryBtn.textContent = '✔ Copied';
+      setTimeout(() => {
+        copySummaryBtn.textContent = '⧉ Copy to clipboard';
+      }, 1200);
+    } catch (e) {
+      console.error(e);
+      copySummaryBtn.textContent = 'Error';
+    }
+  });
+
+  setStatus('idle', 'Idle – waiting for Teams window or mic.');
+</script>
 </body>
 </html>

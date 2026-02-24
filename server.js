@@ -12,37 +12,31 @@ const upload = multer({ dest: 'uploads/' });
 
 const PORT = process.env.PORT || 3000;
 const AAI_KEY = process.env.ASSEMBLYAI_API_KEY;
-const AAI_LLM_KEY = process.env.ASSEMBLYAI_LLM_API_KEY || AAI_KEY; // reuse key if same
 
-// Serve index.html and other static files from this folder
+if (!AAI_KEY) {
+  console.warn('Warning: ASSEMBLYAI_API_KEY is not set. /upload will fail.');
+}
+
 app.use(express.static(path.resolve('./')));
-
-// Parse JSON bodies for /summarize
 app.use(express.json());
 
-// Helper: wait for ms
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ---------------------------
-// 1) /upload – audio -> transcript only
-// ---------------------------
-//
-// Frontend sends the recorded or uploaded file here.
-// This route:
-//   - uploads to AssemblyAI
-//   - creates a transcript (NO summarization here)
-//   - polls until completed
-//   - returns { transcript: "full text..." }
-//
 app.post('/upload', upload.single('audio'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
+    if (!AAI_KEY) {
+      fs.unlink(req.file.path, () => {});
+      return res
+        .status(500)
+        .json({ error: 'Missing ASSEMBLYAI_API_KEY on server' });
+    }
+
     const filePath = req.file.path;
 
-    // 1) Upload the audio file to AssemblyAI's upload endpoint
     const uploadResp = await fetch('https://api.assemblyai.com/v2/upload', {
       method: 'POST',
       headers: {
@@ -56,13 +50,12 @@ app.post('/upload', upload.single('audio'), async (req, res) => {
       const t = await uploadResp.text();
       console.error('Upload error:', uploadResp.status, t);
       fs.unlink(filePath, () => {});
-      return res.status(500).json({ error: 'Upload failed' });
+      return res.status(500).json({ error: 'Upload to AssemblyAI failed' });
     }
 
     const uploadJson = await uploadResp.json();
-    const fileUrl = uploadJson.upload_url; // proper https URL
+    const fileUrl = uploadJson.upload_url;
 
-    // 2) Create transcript WITHOUT summarization (we’ll summarize later)
     const createResp = await fetch('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: {
@@ -72,9 +65,6 @@ app.post('/upload', upload.single('audio'), async (req, res) => {
       body: JSON.stringify({
         audio_url: fileUrl,
         speech_models: ['universal-2'],
-        // summarization: false, // default
-        auto_highlights: false,
-        iab_categories: false,
         punctuate: true,
         format_text: true
       })
@@ -89,8 +79,10 @@ app.post('/upload', upload.single('audio'), async (req, res) => {
 
     let transcript = await createResp.json();
 
-    // 3) Poll until finished
-    while (transcript.status === 'queued' || transcript.status === 'processing') {
+    while (
+      transcript.status === 'queued' ||
+      transcript.status === 'processing'
+    ) {
       await sleep(3000);
       const pollResp = await fetch(
         `https://api.assemblyai.com/v2/transcript/${transcript.id}`,
@@ -101,40 +93,27 @@ app.post('/upload', upload.single('audio'), async (req, res) => {
       transcript = await pollResp.json();
     }
 
+    fs.unlink(filePath, () => {});
+
     if (transcript.status !== 'completed') {
       console.error('Transcription failed:', transcript.error);
-      fs.unlink(filePath, () => {});
       return res
         .status(500)
         .json({ error: 'Transcription failed: ' + transcript.error });
     }
 
     const fullText = transcript.text || '';
+    console.log('Transcript length chars:', fullText.length);
+    console.log('Transcript preview:', fullText.slice(0, 300));
 
-    // 4) Clean up local temp file
-    fs.unlink(filePath, () => {});
-
-    // 5) Send only transcript back to frontend
-    res.json({
-      transcript: fullText
-    });
+    res.json({ transcript: fullText });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error during upload/transcription' });
   }
 });
 
-// ---------------------------
-// 2) /summarize – transcript -> key points summary
-// ---------------------------
-//
-// Frontend sends JSON:
-//   { transcript: "full transcript text..." }
-//
-// We call AssemblyAI's LLM Gateway (or summarization)
-// with a strong prompt to focus on key points only,
-// then return { summary: "• bullet\n• bullet\n..." }
-// ---------------------------
+// /summarize: no max cap, minimum 3 bullets, always include first sentence
 app.post('/summarize', async (req, res) => {
   try {
     const { transcript } = req.body || {};
@@ -144,67 +123,108 @@ app.post('/summarize', async (req, res) => {
         .json({ error: 'Missing transcript text for summarization' });
     }
 
-    // Build a prompt that forces key decisions, actions, and topics.
-    const prompt = `
-You are an expert meeting assistant.
-Your task is to read the meeting transcript and extract ONLY important information.
+    const sentences = transcript
+      .split(/[.?!]\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
 
-Focus on:
-- Key decisions made
-- Action items (with who is responsible, if mentioned)
-- Important topics discussed or conclusions reached
+    if (!sentences.length) {
+      return res.json({
+        summary: 'No summary could be generated from this transcript.'
+      });
+    }
 
-Ignore:
-- Small talk
-- Greetings and farewells
-- Repetitive filler
-- Off-topic chat
+    const actionKeywords = [
+      'will',
+      'need to',
+      'should',
+      'must',
+      'action',
+      'deadline',
+      'follow up',
+      'task',
+      'assign',
+      'decided',
+      'agreed',
+      'plan to',
+      'next step',
+      'next steps'
+    ];
 
-Write your answer as short bullet points (one sentence each).
-Do not number them, just use a dash at the start of each line.
+    const topicKeywords = [
+      'discuss',
+      'talk about',
+      'focus on',
+      'objective',
+      'goal',
+      'timeline',
+      'milestone',
+      'issue',
+      'problem',
+      'solution'
+    ];
 
-Meeting transcript:
-${transcript}
-    `.trim();
+    const scored = sentences.map((s, idx) => {
+      const lower = s.toLowerCase();
+      let score = 0;
 
-    // Call AssemblyAI LLM Gateway (chat completions style)[web:305][web:308][web:311]
-    const llmResp = await fetch(
-      'https://llm-gateway.assemblyai.com/v1/chat/completions',
-      {
-        method: 'POST',
-        headers: {
-          authorization: AAI_LLM_KEY,
-          'content-type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: 'claude-3-5-haiku-20241022',
-          messages: [
-            {
-              role: 'user',
-              content: prompt
-            }
-          ]
-        })
+      actionKeywords.forEach((k) => {
+        if (lower.includes(k)) score += 3;
+      });
+
+      topicKeywords.forEach((k) => {
+        if (lower.includes(k)) score += 2;
+      });
+
+      const len = s.split(/\s+/).length;
+      if (len > 6 && len < 40) score += 1;
+
+      if (idx === 0 || idx === sentences.length - 1) score += 1;
+
+      return { s, score };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+
+    // keep all sentences with positive score
+    let top = scored.filter((item) => item.score > 0);
+
+    // if none got a positive score, fall back to all sentences
+    if (!top.length) {
+      top = scored.slice();
+    }
+
+    // enforce minimum 3 sentences when possible
+    const minSentences = Math.min(3, sentences.length);
+    if (top.length < minSentences) {
+      const existing = new Set(top.map((item) => item.s));
+      for (const s of sentences) {
+        if (!existing.has(s)) {
+          top.push({ s, score: 0 });
+          if (top.length >= minSentences) break;
+        }
       }
+    }
+
+    // always include the first sentence for context
+    const firstSentence = sentences[0];
+    if (!top.some((item) => item.s === firstSentence)) {
+      top.unshift({ s: firstSentence, score: Infinity });
+    }
+
+    // dedupe and restore original transcript order
+    top = top.filter(
+      (item, index, self) =>
+        index === self.findIndex((other) => other.s === item.s)
+    );
+    top.sort(
+      (a, b) => sentences.indexOf(a.s) - sentences.indexOf(b.s)
     );
 
-    if (!llmResp.ok) {
-      const t = await llmResp.text();
-      console.error('LLM summary error:', llmResp.status, t);
-      return res.status(500).json({ error: 'Summary generation failed' });
-    }
+    const bullets = top.map((item) => `• ${item.s}`).join('\n');
+    const header = 'Key decisions, actions, and topics:';
+    const summaryText = `${header}\n\n${bullets}`;
 
-    const result = await llmResp.json();
-    let summaryText =
-      result?.choices?.[0]?.message?.content?.[0]?.text ||
-      result?.choices?.[0]?.message?.content ||
-      '';
-
-    if (!summaryText || typeof summaryText !== 'string') {
-      summaryText = 'No summary could be generated from this transcript.';
-    }
-
-    // Respond with summary (front-end will render bullets)
     res.json({ summary: summaryText });
   } catch (err) {
     console.error(err);
