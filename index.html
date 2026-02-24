@@ -759,7 +759,7 @@
                   ⏺ Start recording
                 </button>
                 <button id="stopRecBtn" class="btn-ghost danger" disabled>
-                  ⏹ Stop & summarise
+                  ⏹ Stop capture
                 </button>
               </div>
 
@@ -866,6 +866,9 @@
                 <span class="tag">Decisions</span>
               </div>
               <div class="summary-actions">
+                <button id="summarizeBtn" class="btn-ghost" style="font-size:11px;padding:5px 10px;">
+                  ✨ Summarize transcript
+                </button>
                 <button id="copySummaryBtn" class="btn-ghost" style="font-size:11px;padding:5px 10px;">
                   ⧉ Copy to clipboard
                 </button>
@@ -893,6 +896,7 @@
     const summaryBox = document.getElementById('summaryBox');
     const meetingMeta = document.getElementById('meetingMeta');
     const copySummaryBtn = document.getElementById('copySummaryBtn');
+    const summarizeBtn = document.getElementById('summarizeBtn');
 
     let displayStream = null;
     let micStream = null;
@@ -907,8 +911,10 @@
       statusIndicator.classList.remove('active', 'recording', 'error');
       recordStatePill.classList.remove('paused');
 
+      const dotEl = recordStatePill.querySelector('.dot');
+
       if (mode === 'idle') {
-        recordStatePill.querySelector('.dot').style.background = '#22c55e';
+        if (dotEl) dotEl.style.background = '#22c55e';
         statusIndicator.classList.add('active');
         recordStatePill.textContent = '';
         const dot = document.createElement('span');
@@ -917,16 +923,22 @@
         recordStatePill.appendChild(document.createTextNode(' Ready to capture'));
       } else if (mode === 'recording') {
         statusIndicator.classList.add('recording');
-        recordStatePill.querySelector('.dot').style.background = '#f97316';
+        if (dotEl) dotEl.style.background = '#f97316';
         recordStatePill.classList.add('paused');
-        recordStatePill.childNodes[1].nodeValue = ' Recording in progress';
+        if (recordStatePill.childNodes[1]) {
+          recordStatePill.childNodes[1].nodeValue = ' Recording in progress';
+        }
       } else if (mode === 'processing') {
-        recordStatePill.querySelector('.dot').style.background = '#22c55e';
-        recordStatePill.childNodes[1].nodeValue = ' Processing & summarising';
+        if (dotEl) dotEl.style.background = '#22c55e';
+        if (recordStatePill.childNodes[1]) {
+          recordStatePill.childNodes[1].nodeValue = ' Processing audio…';
+        }
       } else if (mode === 'error') {
         statusIndicator.classList.add('error');
-        recordStatePill.querySelector('.dot').style.background = '#ef4444';
-        recordStatePill.childNodes[1].nodeValue = ' Something went wrong';
+        if (dotEl) dotEl.style.background = '#ef4444';
+        if (recordStatePill.childNodes[1]) {
+          recordStatePill.childNodes[1].nodeValue = ' Something went wrong';
+        }
       }
     }
 
@@ -973,7 +985,6 @@
         transcriptChip.textContent = 'Waiting for recording…';
 
         displayStream.getVideoTracks()[0].addEventListener('ended', () => {
-          // Share stopped from browser UI
           displayStream = null;
           if (mediaRecorder && mediaRecorder.state === 'recording') {
             mediaRecorder.stop();
@@ -1028,7 +1039,6 @@
           mimeType: 'video/webm;codecs=vp8,opus'
         });
       } catch (e) {
-        // Fallback for audio-only mic mode
         mediaRecorder = new MediaRecorder(combinedStream);
       }
 
@@ -1039,10 +1049,11 @@
       };
 
       mediaRecorder.onstop = async () => {
-        setStatus('processing', 'Uploading recording to backend and generating summary…');
+        setStatus('processing', 'Uploading recording to backend and generating transcript…');
         const blob = new Blob(chunks, { type: 'video/webm' });
         const formData = new FormData();
-        formData.append('file', blob, 'teams_meeting.webm');
+        // NOTE: server.js new version expects field name "audio"
+        formData.append('audio', blob, 'teams_meeting.webm');
 
         try {
           const res = await fetch('/upload', {
@@ -1056,21 +1067,18 @@
 
           const data = await res.json();
           const transcript = (data.transcript || '').trim();
-          const summary = (data.summary || '').trim();
 
           transcriptChip.textContent = transcript ? 'Transcript ready' : 'No transcript from backend';
           transcriptText.textContent = transcript || 'No transcript returned. Check your backend STT implementation.';
 
-          const finalSummary = summary || buildFallbackSummary(transcript);
-          summaryBox.textContent = finalSummary;
-          meetingMeta.textContent = 'Most recent capture just finished. You can copy the summary into your notes app.';
-          setStatus('idle', 'Done. Summary generated.');
-
+          summaryBox.textContent = 'Transcript ready. Click “Summarize transcript” to generate key points from this meeting.';
+          meetingMeta.textContent = 'Transcript generated. Review or edit, then click Summarize to get key points.';
+          setStatus('idle', 'Done. Transcript generated.');
         } catch (err) {
           console.error(err);
           transcriptChip.textContent = 'Error';
-          transcriptText.textContent = 'Failed to reach /upload endpoint. Make sure your backend is running and returns JSON { transcript, summary }.';
-          summaryBox.textContent = 'Could not generate summary because the backend request failed.';
+          transcriptText.textContent = 'Failed to reach /upload endpoint. Make sure your backend is running and returns JSON { transcript }.';
+          summaryBox.textContent = 'Could not generate transcript because the backend request failed.';
           meetingMeta.textContent = 'Backend error – fix your /upload endpoint and try again.';
           setStatus('error', 'Backend request failed. See console for details.');
         } finally {
@@ -1090,6 +1098,40 @@
         mediaRecorder.stop();
       }
     }
+
+    // Summarize existing transcript using /summarize
+    summarizeBtn.addEventListener('click', async () => {
+      const transcript = (transcriptText.textContent || '').trim();
+      if (!transcript) {
+        alert('Transcript is empty. Record a meeting first.');
+        return;
+      }
+
+      summaryBox.textContent = 'Summarizing into key decisions and action items…';
+      meetingMeta.textContent = 'Summarizing current transcript into key points.';
+
+      try {
+        const res = await fetch('/summarize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ transcript })
+        });
+
+        if (!res.ok) {
+          throw new Error('Server error while summarizing');
+        }
+
+        const data = await res.json();
+        const summary = (data.summary || '').trim();
+
+        summaryBox.textContent = summary || 'No summary generated.';
+        meetingMeta.textContent = 'Summary updated. You can copy it into your notes.';
+      } catch (err) {
+        console.error(err);
+        summaryBox.textContent = 'Failed to generate summary. Please try again.';
+        meetingMeta.textContent = 'Summary error – see console.';
+      }
+    });
 
     shareBtn.addEventListener('click', startTeamsShare);
     micOnlyBtn.addEventListener('click', startMicOnly);
